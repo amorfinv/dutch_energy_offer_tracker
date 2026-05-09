@@ -1,0 +1,906 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Energy Offer Tracker – NL 2026</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,700;1,9..40,300&family=Instrument+Serif&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{font-family:'DM Sans',sans-serif;background:linear-gradient(168deg,#f0f4f1 0%,#e8ecea 40%,#f5f0eb 100%);color:#1a2a1a;min-height:100%}
+body{min-height:100vh}
+::-webkit-scrollbar{height:6px;width:6px}::-webkit-scrollbar-thumb{background:#4a5a6a40;border-radius:3px}
+input:focus{outline:none;border-color:#2d6a4f!important;box-shadow:0 0 0 3px #2d6a4f20}
+button{cursor:pointer}button:hover{opacity:0.85}
+#root{min-height:100vh}canvas{max-height:280px}
+[data-tip]{position:relative}
+[data-tip]:hover{z-index:500}
+[data-tip]:hover::after{content:attr(data-tip);position:absolute;bottom:calc(100% + 8px);left:50%;transform:translateX(-50%);background:#1a3a2a;color:#f0f4f1;padding:6px 12px;border-radius:8px;font-size:12px;white-space:nowrap;z-index:600;pointer-events:none;opacity:0;animation:tipIn .15s ease forwards;font-family:'DM Sans',sans-serif;box-shadow:0 4px 12px rgba(0,0,0,0.15)}
+[data-tip]:hover::before{content:'';position:absolute;bottom:calc(100% + 3px);left:50%;transform:translateX(-50%);border:5px solid transparent;border-top-color:#1a3a2a;z-index:600;pointer-events:none;opacity:0;animation:tipIn .15s ease forwards}
+.tip-down:hover::after{bottom:auto!important;top:calc(100% + 8px)}.tip-down:hover::before{bottom:auto!important;top:calc(100% + 3px);border-top-color:transparent!important;border-bottom-color:#1a3a2a}
+.offer-card{position:relative;z-index:1}
+.offer-card:hover{z-index:50}
+.act-del:active,.act-del:focus{background:linear-gradient(135deg,#b44,#c66)!important;border:1px solid #b44!important;color:#fff!important;box-shadow:0 2px 6px rgba(180,68,68,.3)!important;outline:none}
+@keyframes tipIn{to{opacity:1}}
+</style>
+<script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
+<script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+<script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.26.2/babel.min.js"></script>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const {useState,useEffect,useRef}=React;
+const ChartJS=window.Chart;
+if(!ChartJS)console.warn("Chart.js not loaded");
+const SK="energy-offers-v8",UK="energy-usage-v1",BTW=0.21,CTAG="__current__";
+
+/* Energy tax brackets — for INFO display only, NOT used in cost calculations.
+   All user-entered rates already include energy tax + BTW. */
+const EB=[{from:0,to:2900,rate:.0916,label:"0–2,900"},{from:2900,to:10000,rate:.0916,label:"2,900–10k"},{from:10000,to:50000,rate:.0465,label:"10k–50k"},{from:50000,to:1e7,rate:.0149,label:"50k–10M"}];
+const GB=[{from:0,to:1000,rate:.6007,label:"0–1,000"},{from:1000,to:170000,rate:.6007,label:"1k–170k"},{from:170000,to:1e6,rate:.3309,label:"170k–1M"},{from:1e6,to:1e7,rate:.214,label:"1M–10M"}];
+
+const P=v=>parseFloat(v)||0,FE=v=>v==null||isNaN(v)?"—":"€"+v.toFixed(2),FR=v=>v==null||v===""||isNaN(v)?"—":"€"+parseFloat(v).toFixed(4);
+
+/*
+ * SIMPLIFIED CALCULATION — everything is incl. BTW.
+ *
+ * Energy cost   = usage × rate  (rate is incl BTW as entered)
+ * Fixed costs   = annual amounts / 12 × months  (entered incl BTW)
+ * Vermindering  = annual reduction / 12 × months (entered incl BTW)
+ * Total incl BTW = energy + fixed - vermindering
+ * Estimated BTW  = total / 1.21 × 0.21  (informational only)
+ */
+function calcOffer(o,usage){
+  let eu,gu,offKwh,onKwh,gasM3,months;
+  if(usage){
+    offKwh=usage.offPeakKwh;onKwh=usage.onPeakKwh;gasM3=usage.gasM3;months=usage.months||1;
+    eu=offKwh+onKwh;gu=gasM3;
+  }else{
+    eu=P(o.annualElecUsage);gu=P(o.annualGasUsage);
+    offKwh=eu/2;onKwh=eu/2;gasM3=gu;months=12;
+  }
+
+  const offR=P(o.offPeakRate),onR=P(o.onPeakRate),gasR=P(o.gasPrice);
+
+  /* Energy cost (incl BTW) */
+  const ec=offKwh*offR+onKwh*onR;
+  const gc=gasM3*gasR;
+
+  /* Fixed costs (entered as annual incl BTW), prorated */
+  const en=P(o.elecNetworkCost)/12*months;
+  const gn=P(o.gasNetworkCost)/12*months;
+  const ed=P(o.elecDeliveryCost)/12*months;
+  const gd=P(o.gasDeliveryCost)/12*months;
+  const tr=P(o.energyTaxReduction)/12*months;
+
+  /* Subtotals (all incl BTW) */
+  const esub=ec+en+ed-tr;
+  const gsub=gc+gn+gd;
+  const tin=esub+gsub; /* total incl BTW */
+
+  /* Estimated BTW (informational) */
+  const texEst=tin/(1+BTW); /* estimated excl BTW */
+  const btwEst=tin-texEst;  /* estimated BTW portion */
+
+  const mo=tin/months;
+
+  return{eu,gu,offKwh,onKwh,gasM3,months,offR,onR,gasR,ec,gc,en,gn,ed,gd,tr,esub,gsub,tin,texEst,btwEst,mo,isActual:!!usage};
+}
+
+const SF=["offPeakRate","onPeakRate","gasPrice","elecNetworkCost","gasNetworkCost","elecDeliveryCost","gasDeliveryCost","energyTaxReduction","annualElecUsage","annualGasUsage"];
+const CF=["company","planName","contractLength","advertisedMonthlyCost","isCurrent","snapshotDate","snapshotLabel",...SF,"notes"];
+function mkS(f,l){const s={id:Date.now()+Math.random()*999,date:new Date().toISOString().slice(0,10),label:l||""};SF.forEach(k=>s[k]=f[k]||"");return s;}
+function curS(o){return o.history&&o.history.length?o.history[o.history.length-1]:null;}
+function wS(o,s){const r={...o};if(s)SF.forEach(k=>r[k]=s[k]);return r;}
+function isC(o){return o.tag===CTAG;}
+function hasR(o){const s=curS(o);return s&&(P(s.offPeakRate)>0||P(s.gasPrice)>0);}
+const LD=k=>{try{return JSON.parse(localStorage.getItem(k));}catch{return null;}};
+const SV=(k,d)=>{try{localStorage.setItem(k,JSON.stringify(d));}catch{}};
+function fullName(o){const parts=[];if(isC(o))parts.push("🏠");parts.push(o.company||"My Current Plan");if(o.planName)parts.push("– "+o.planName);if(o.contractLength)parts.push("("+o.contractLength+"mo)");return parts.join(" ");}
+
+const EMPTY={company:"",planName:"",contractLength:"",advertisedMonthlyCost:"",offPeakRate:"",onPeakRate:"",gasPrice:"",elecNetworkCost:"",gasNetworkCost:"",elecDeliveryCost:"",gasDeliveryCost:"",energyTaxReduction:"628.96",annualElecUsage:"2900",annualGasUsage:"1200",notes:""};
+const SECS=[
+  {t:"Basic Info",f:[{k:"company",l:"Company",t:"text",p:"e.g. Vattenfall"},{k:"planName",l:"Plan Name",t:"text",p:"e.g. Basis Vast"},{k:"contractLength",l:"Contract",t:"number",u:"mo",p:"12"},{k:"advertisedMonthlyCost",l:"Adv. Monthly",t:"number",u:"€/mo",p:"0.00"}]},
+  {t:"Energy Rates (incl. BTW & tax)",f:[{k:"offPeakRate",l:"Off-Peak",t:"number",u:"€/kWh",p:"0.0000"},{k:"onPeakRate",l:"On-Peak",t:"number",u:"€/kWh",p:"0.0000"},{k:"gasPrice",l:"Gas",t:"number",u:"€/m³",p:"0.0000"}]},
+  {t:"Elec. Fixed (annual incl BTW)",f:[{k:"elecNetworkCost",l:"Network/Systeem",t:"number",u:"€/yr",p:"476.76"},{k:"elecDeliveryCost",l:"Vaste lever.",t:"number",u:"€/yr",p:"115.20"}]},
+  {t:"Gas Fixed (annual incl BTW)",f:[{k:"gasNetworkCost",l:"Network/Systeem",t:"number",u:"€/yr",p:"274.44"},{k:"gasDeliveryCost",l:"Vaste lever.",t:"number",u:"€/yr",p:"95.88"}]},
+  {t:"Reduction & Usage",f:[{k:"energyTaxReduction",l:"Vermindering",t:"number",u:"€/yr incl",p:"628.96"},{k:"annualElecUsage",l:"Ann. Elec",t:"number",u:"kWh",p:"2900"},{k:"annualGasUsage",l:"Ann. Gas",t:"number",u:"m³",p:"1200"}]},
+];
+const DFLT_IDS={t1:"sensor.electricity_meter_energy_consumption_tarif_1",t2:"sensor.electricity_meter_energy_consumption_tarif_2",gas:"sensor.gas_meter_gas_consumption"};
+
+/* ── Usage data parsing ── */
+function parseHA(text,ids){
+  const lines=text.split("\n").filter(l=>l.trim());if(lines.length<2)return null;
+  const hdr=lines[0].split(","); const dates=hdr.slice(3).map(d=>{try{return new Date(d);}catch{return null;}});
+  const rows={};
+  lines.slice(1).forEach(line=>{
+    const cols=[];let cur="",inQ=false;
+    for(let i=0;i<line.length;i++){const c=line[i];if(c==='"')inQ=!inQ;else if(c===','&&!inQ){cols.push(cur);cur="";}else cur+=c;}cols.push(cur);
+    const eid=cols[0];if(!eid)return;
+    rows[eid]=cols.slice(3).map(v=>{const n=parseFloat(v);return isNaN(n)?0:n;});
+  });
+  const t1=rows[ids.t1]||[], t2=rows[ids.t2]||[], gas=rows[ids.gas]||[];
+  const monthly={};
+  dates.forEach((d,i)=>{
+    if(!d||isNaN(d))return;
+    const key=d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0");
+    if(!monthly[key])monthly[key]={offPeak:0,onPeak:0,gas:0,days:0};
+    monthly[key].offPeak+=(t1[i]||0);
+    monthly[key].onPeak+=(t2[i]||0);
+    monthly[key].gas+=(gas[i]||0);
+    if((t1[i]||0)>0||(t2[i]||0)>0||(gas[i]||0)>0)monthly[key].days++;
+  });
+  return monthly;
+}
+
+function getBestMonth(monthly){
+  if(!monthly)return null;
+  const keys=Object.keys(monthly).sort();if(!keys.length)return null;
+  const now=new Date();
+  const prevMoKey=now.getMonth()===0?(now.getFullYear()-1)+"-12":now.getFullYear()+"-"+String(now.getMonth()).padStart(2,"0");
+  const lastMoKey=now.getFullYear()+"-"+String(now.getMonth()+1).padStart(2,"0");
+  const lastYrKey=(now.getFullYear()-1)+"-"+String(now.getMonth()+1).padStart(2,"0");
+  if(monthly[prevMoKey]&&monthly[prevMoKey].days>=20)return{key:prevMoKey,...monthly[prevMoKey]};
+  if(monthly[lastMoKey]&&monthly[lastMoKey].days>=15)return{key:lastMoKey,...monthly[lastMoKey]};
+  if(monthly[lastYrKey]&&monthly[lastYrKey].days>=20)return{key:lastYrKey,...monthly[lastYrKey],isLastYear:true};
+  for(let i=keys.length-1;i>=0;i--){if(monthly[keys[i]].days>=15)return{key:keys[i],...monthly[keys[i]]};}
+  return null;
+}
+
+function usageForCalc(bestMonth){
+  if(!bestMonth)return null;
+  return{offPeakKwh:bestMonth.offPeak,onPeakKwh:bestMonth.onPeak,gasM3:bestMonth.gas,months:1};
+}
+
+/* ── Chart helpers ── */
+const COLORS=["#2d6a4f","#e07a3a","#3a7dc9","#c94a6a","#6a4fc9","#4ab89a","#c9a84a"];
+
+function TimelineChart({offer}){
+  const ref=useRef(null),ch=useRef(null);const hist=offer.history||[];
+  useEffect(()=>{if(!ChartJS||!ref.current||hist.length<2)return;if(ch.current)ch.current.destroy();
+    ch.current=new ChartJS(ref.current,{type:"line",data:{labels:hist.map(s=>s.label||s.date),datasets:[
+      {label:"Monthly (€)",data:hist.map(s=>calcOffer(wS(offer,s),null).mo),borderColor:"#2d6a4f",backgroundColor:"rgba(45,106,79,0.1)",fill:true,tension:.3,pointRadius:5,pointBackgroundColor:"#2d6a4f"},
+      {label:"Off-Peak",data:hist.map(s=>P(s.offPeakRate)),borderColor:"#3a7dc9",borderDash:[5,3],tension:.3,pointRadius:4,yAxisID:"y1"},
+      {label:"On-Peak",data:hist.map(s=>P(s.onPeakRate)),borderColor:"#e07a3a",borderDash:[5,3],tension:.3,pointRadius:4,yAxisID:"y1"},
+    ]},options:{responsive:true,maintainAspectRatio:false,interaction:{mode:"index",intersect:false},plugins:{legend:{position:"bottom",labels:{boxWidth:12,font:{size:11,family:"DM Sans"}}}},scales:{y:{title:{display:true,text:"€/mo",font:{size:11}},grid:{color:"#e8ecea"}},y1:{position:"right",title:{display:true,text:"Rate",font:{size:11}},grid:{display:false}},x:{grid:{display:false}}}}});
+    return()=>{if(ch.current)ch.current.destroy();};
+  },[hist,offer]);
+  if(hist.length<2)return null;
+  return <div style={{height:250,marginTop:12}}><canvas ref={ref}/></div>;
+}
+
+/* Standalone gas-rate timeline so the gas trend isn't squished under the electricity rates. */
+function GasTimelineChart({offer}){
+  const ref=useRef(null),ch=useRef(null);const hist=offer.history||[];
+  useEffect(()=>{if(!ChartJS||!ref.current||hist.length<2)return;if(ch.current)ch.current.destroy();
+    ch.current=new ChartJS(ref.current,{type:"line",data:{labels:hist.map(s=>s.label||s.date),datasets:[
+      {label:"Gas (€/m³)",data:hist.map(s=>P(s.gasPrice)),borderColor:"#c94a6a",backgroundColor:"rgba(201,74,106,0.1)",fill:true,tension:.3,pointRadius:5,pointBackgroundColor:"#c94a6a"},
+      {label:"Network",data:hist.map(s=>P(s.gasNetworkCost)),borderColor:"#8a4a6a",borderDash:[5,3],tension:.3,pointRadius:4,yAxisID:"y1"},
+      {label:"Delivery",data:hist.map(s=>P(s.gasDeliveryCost)),borderColor:"#e07a3a",borderDash:[5,3],tension:.3,pointRadius:4,yAxisID:"y1"},
+    ]},options:{responsive:true,maintainAspectRatio:false,interaction:{mode:"index",intersect:false},plugins:{legend:{position:"bottom",labels:{boxWidth:12,font:{size:11,family:"DM Sans"}}}},scales:{y:{title:{display:true,text:"€/m³",font:{size:11}},grid:{color:"#e8ecea"}},y1:{position:"right",title:{display:true,text:"€/yr",font:{size:11}},grid:{display:false}},x:{grid:{display:false}}}}});
+    return()=>{if(ch.current)ch.current.destroy();};
+  },[hist,offer]);
+  if(hist.length<2)return null;
+  return <div style={{height:250,marginTop:12}}><canvas ref={ref}/></div>;
+}
+
+function CompareCharts({items,usage}){
+  const mR=useRef(null),sR=useRef(null),mC=useRef(null),sC=useRef(null);
+  useEffect(()=>{if(!ChartJS||!mR.current||items.length<1)return;if(mC.current)mC.current.destroy();if(sC.current)sC.current.destroy();
+    const labels=items.map(o=>fullName(o));
+    const mos=items.map(o=>calcOffer(wS(o,curS(o)),usage).mo);
+    const bg=items.map((o,i)=>isC(o)?"#88888899":COLORS[i%COLORS.length]+"cc");
+    const br=items.map((o,i)=>isC(o)?"#888":COLORS[i%COLORS.length]);
+    mC.current=new ChartJS(mR.current,{type:"bar",data:{labels,datasets:[{label:usage?"Actual month (€)":"Est. monthly (€)",data:mos,backgroundColor:bg,borderColor:br,borderWidth:2,borderRadius:6}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{grid:{display:false}},y:{title:{display:true,text:"€/month",font:{size:11}},grid:{color:"#e8ecea"}}}}});
+    const eD=items.map(o=>calcOffer(wS(o,curS(o)),usage).esub);
+    const gD=items.map(o=>calcOffer(wS(o,curS(o)),usage).gsub);
+    sC.current=new ChartJS(sR.current,{type:"bar",data:{labels,datasets:[{label:"Electricity",data:eD,backgroundColor:bg.map(c=>c.replace("cc","99")),borderColor:br,borderWidth:1},{label:"Gas",data:gD,backgroundColor:bg.map(c=>c.replace("cc","55").replace("99","55")),borderColor:br,borderWidth:1}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{position:"bottom",labels:{boxWidth:12,font:{size:11}}}},scales:{x:{stacked:true,grid:{display:false}},y:{stacked:true,title:{display:true,text:usage?"Month cost (€)":"Annual (€)",font:{size:11}},grid:{color:"#e8ecea"}}}}});
+    return()=>{if(mC.current)mC.current.destroy();if(sC.current)sC.current.destroy();};
+  },[items,usage]);
+  if(items.length<1)return null;
+  return <div><div style={{height:250}}><canvas ref={mR}/></div><div style={{height:250,marginTop:16}}><canvas ref={sR}/></div></div>;
+}
+
+function UsageChart({monthly}){
+  const ref=useRef(null),ch=useRef(null);
+  useEffect(()=>{if(!ChartJS||!ref.current||!monthly)return;if(ch.current)ch.current.destroy();
+    const keys=Object.keys(monthly).sort();
+    /* Manual months get a slightly more saturated fill plus a dashed border so they're identifiable but stack the same as HA bars. */
+    const isManual=k=>monthly[k].source==="manual";
+    const offBg=keys.map(k=>isManual(k)?"#3a7dc999":"#3a7dc966");
+    const onBg =keys.map(k=>isManual(k)?"#e07a3a99":"#e07a3a66");
+    const gasBg=keys.map(k=>isManual(k)?"#c94a6a99":"#c94a6a66");
+    const dash =keys.map(k=>isManual(k)?[4,3]:[]);
+    ch.current=new ChartJS(ref.current,{type:"bar",data:{labels:keys,datasets:[
+      {label:"Off-Peak kWh",data:keys.map(k=>monthly[k].offPeak),backgroundColor:offBg,borderColor:"#3a7dc9",borderWidth:1,borderDash:dash},
+      {label:"On-Peak kWh",data:keys.map(k=>monthly[k].onPeak),backgroundColor:onBg,borderColor:"#e07a3a",borderWidth:1,borderDash:dash},
+      {label:"Gas m³",data:keys.map(k=>monthly[k].gas),backgroundColor:gasBg,borderColor:"#c94a6a",borderWidth:1,yAxisID:"y1",borderDash:dash},
+    ]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{position:"bottom",labels:{boxWidth:12,font:{size:11}}},tooltip:{callbacks:{afterTitle:(items)=>{const k=items[0]&&items[0].label;return k&&isManual(k)?"(manual entry)":"";}}}},scales:{x:{grid:{display:false}},y:{title:{display:true,text:"kWh",font:{size:11}},grid:{color:"#e8ecea"}},y1:{position:"right",title:{display:true,text:"m³",font:{size:11}},grid:{display:false}}}}});
+    return()=>{if(ch.current)ch.current.destroy();};
+  },[monthly]);
+  if(!monthly)return null;
+  return <div style={{height:250,marginTop:12}}><canvas ref={ref}/></div>;
+}
+
+/* ── Sub components ── */
+const Row=({l,r})=><div style={S.bRow}><span>{l}</span><span>{r}</span></div>;
+const BRow=({l,r})=><div style={S.bBold}><span>{l}</span><span>{r}</span></div>;
+const TRow=({l,r})=><div style={S.bTot}><span>{l}</span><span>{r}</span></div>;
+
+/* ── App ── */
+function App(){
+  const [offers,setOffers]=useState(()=>LD(SK)||[]);
+  const [form,setForm]=useState({...EMPTY});
+  const [snapLbl,setSnapLbl]=useState("");
+  const [editId,setEditId]=useState(null);
+  /* When editing an offer with >1 snapshot, editSnapId tracks which specific snapshot is being modified.
+     If null, edits append a new snapshot (legacy / single-snapshot path). */
+  const [editSnapId,setEditSnapId]=useState(null);
+  /* When set, opens the themed snapshot picker dialog for an offer with multiple snapshots. */
+  const [snapPicker,setSnapPicker]=useState(null);
+  const [updateId,setUpdateId]=useState(null);
+  const [showForm,setShowForm]=useState(false);
+  const [formIsC,setFormIsC]=useState(false);
+  const [expId,setExpId]=useState(null);
+  const [sortKey,setSortKey]=useState("company");
+  const [sortAsc,setSortAsc]=useState(true);
+  const [cmpIds,setCmpIds]=useState([]);
+  const [showCmp,setShowCmp]=useState(false);
+  const [showTax,setShowTax]=useState(false);
+  const [showHelp,setShowHelp]=useState(false);
+  const [histId,setHistId]=useState(null);
+  const [histCmp,setHistCmp]=useState([]);
+  const [showMenu,setShowMenu]=useState(false);
+  const [usageData,setUsageData]=useState(()=>LD(UK));
+  const [showUsage,setShowUsage]=useState(false);
+  /* User-chosen month for cost calculations. Empty string = auto (use best month / manual selection).
+     When set to a key that exists in combinedMonthly it takes precedence over both. */
+  const UMK="energy-usage-month-override";
+  const [usageMonthOverride,setUsageMonthOverride]=useState(()=>LD(UMK)||"");
+  useEffect(()=>{if(usageMonthOverride)SV(UMK,usageMonthOverride);else localStorage.removeItem(UMK);},[usageMonthOverride]);
+  const [entityIds,setEntityIds]=useState({...DFLT_IDS});
+  const [uploadKey,setUploadKey]=useState(0);
+  const MK="energy-manual-usage-v2";
+  const defManual={months:{},selected:"",editMonth:""};
+  const [manual,setManual]=useState(()=>{
+    const d=LD(MK);if(d&&d.months)return d;
+    const v1=LD("energy-manual-usage");
+    if(v1&&(P(v1.offPeak)>0||P(v1.onPeak)>0||P(v1.gas)>0)){
+      const now=new Date(),key=now.getFullYear()+"-"+String(now.getMonth()+1).padStart(2,"0");
+      return{months:{[key]:{offPeak:v1.offPeak,onPeak:v1.onPeak,gas:v1.gas}},selected:key,editMonth:key};
+    }
+    return{...defManual};
+  });
+  const fRef=useRef(null),fileRef=useRef(null),usageRef=useRef(null);
+
+  useEffect(()=>{SV(SK,offers);},[offers]);
+  useEffect(()=>{if(usageData)SV(UK,usageData);else localStorage.removeItem(UK);},[usageData]);
+  useEffect(()=>{SV(MK,manual);},[manual]);
+
+  const manualMonths=manual.months||{};
+  const manualKeys=Object.keys(manualMonths).sort();
+  const manualSel=manual.selected&&manualMonths[manual.selected]?manual.selected:(manualKeys.length?manualKeys[manualKeys.length-1]:"");
+  const manualCur=manualSel?manualMonths[manualSel]:null;
+  const hasManual=manualCur&&(P(manualCur.offPeak)>0||P(manualCur.onPeak)>0||P(manualCur.gas)>0);
+
+  const setManualMonth=(monthKey,field,val)=>{
+    setManual(m=>{const ms={...m.months};if(!ms[monthKey])ms[monthKey]={offPeak:"",onPeak:"",gas:""};ms[monthKey]={...ms[monthKey],[field]:val};return{...m,months:ms};});
+  };
+  const addManualMonth=(key)=>{
+    if(!key)return;
+    setManual(m=>{const ms={...m.months};if(!ms[key])ms[key]={offPeak:"",onPeak:"",gas:""};return{...m,months:ms,selected:key,editMonth:key};});
+  };
+  const delManualMonth=(key)=>{
+    setManual(m=>{const ms={...m.months};delete ms[key];const ks=Object.keys(ms).sort();return{...m,months:ms,selected:ks.length?ks[ks.length-1]:"",editMonth:ks.length?ks[ks.length-1]:""};});
+  };
+  const selectManualMonth=(key)=>setManual(m=>({...m,selected:key}));
+
+  const ch=(k,v)=>setForm(f=>({...f,[k]:v}));
+  const curO=offers.find(isC);
+  /* Combine HA + manual months into a single monthly dataset.
+     Manual entries take precedence over HA data for the same month so corrections win. */
+  const combinedMonthly=(()=>{
+    const out={};
+    if(usageData)Object.keys(usageData).forEach(k=>{out[k]={...usageData[k],source:usageData[k].source||"ha"};});
+    if(manualMonths)Object.keys(manualMonths).forEach(k=>{
+      const m=manualMonths[k];
+      const off=P(m.offPeak),on=P(m.onPeak),gas=P(m.gas);
+      if(off>0||on>0||gas>0){out[k]={offPeak:off,onPeak:on,gas:gas,days:30,source:"manual"};}
+    });
+    return Object.keys(out).length?out:null;
+  })();
+  const bestMonth=combinedMonthly?getBestMonth(combinedMonthly):null;
+  /* Resolve which month actually drives calculations:
+       1. an explicit user override (if it still points to a real month),
+       2. the manually-selected month when its values are non-zero,
+       3. the auto-detected best month from combinedMonthly. */
+  const overrideValid=usageMonthOverride&&combinedMonthly&&combinedMonthly[usageMonthOverride];
+  const effectiveMonthKey=overrideValid
+    ?usageMonthOverride
+    :(hasManual?manualSel:(bestMonth?bestMonth.key:null));
+  const effectiveMonth=effectiveMonthKey&&combinedMonthly&&combinedMonthly[effectiveMonthKey]
+    ?combinedMonthly[effectiveMonthKey]
+    :null;
+  const usageCalc=effectiveMonth?{
+    offPeakKwh:effectiveMonth.offPeak,
+    onPeakKwh:effectiveMonth.onPeak,
+    gasM3:effectiveMonth.gas,
+    months:1,
+    isManual:effectiveMonth.source==="manual",
+    monthKey:effectiveMonthKey,
+    isOverride:!!overrideValid
+  }:null;
+  const usageLabel=effectiveMonthKey
+    ?effectiveMonthKey+(effectiveMonth&&effectiveMonth.source==="manual"?" (manual)":"")+(overrideValid?" — your pick":(bestMonth&&bestMonth.key===effectiveMonthKey&&bestMonth.isLastYear?" (last year)":""))
+    :null;
+  const curMo=curO&&hasR(curO)?calcOffer(wS(curO,curS(curO)),usageCalc).mo:null;
+  const others=offers.filter(o=>!isC(o));
+
+  const sorted=[...others].sort((a,b)=>{let av,bv;if(sortKey==="_mo"){av=calcOffer(wS(a,curS(a)),usageCalc).mo;bv=calcOffer(wS(b,curS(b)),usageCalc).mo;}else{av=a[sortKey];bv=b[sortKey];}if(av===""||av==null)return 1;if(bv===""||bv==null)return-1;const na=parseFloat(av),nb=parseFloat(bv);if(!isNaN(na)&&!isNaN(nb))return sortAsc?na-nb:nb-na;return sortAsc?String(av).localeCompare(String(bv)):String(bv).localeCompare(String(av));});
+  const cmpO=offers.filter(o=>cmpIds.includes(o.id)&&!isC(o));
+  const cmpAll=curO&&hasR(curO)?[curO,...cmpO]:cmpO;
+  const canCmp=cmpAll.length>=2||(cmpO.length>=1&&curO&&hasR(curO));
+
+  /* Build the next history array for an edit-submit:
+     - If editSnapId targets an existing snapshot, replace it in place (preserving id + original date).
+     - Otherwise append a new snapshot (offer had no history, etc.). */
+  const editedHistory=(o)=>{
+    const newSnap=mkS(form,snapLbl||"Updated");
+    const hist=o.history||[];
+    if(editSnapId!==null&&hist.some(s=>s.id===editSnapId)){
+      return hist.map(s=>s.id===editSnapId?{...newSnap,id:s.id,date:s.date}:s);
+    }
+    return [...hist,newSnap];
+  };
+  const submit=()=>{
+    if(formIsC){
+      if(editId!==null&&curO){setOffers(os=>os.map(o=>{if(o.id!==editId)return o;return{...o,company:form.company||"My Current Plan",planName:form.planName,contractLength:form.contractLength,notes:form.notes,history:editedHistory(o)};}));setEditId(null);setEditSnapId(null);}
+      else if(updateId!==null&&curO){setOffers(os=>os.map(o=>{if(o.id!==updateId)return o;return{...o,history:[...(o.history||[]),mkS(form,snapLbl||"Update "+((o.history||[]).length+1))]};}));setUpdateId(null);}
+      else if(!curO){setOffers(os=>[{id:Date.now(),tag:CTAG,company:form.company||"My Current Plan",planName:form.planName||"",contractLength:form.contractLength,advertisedMonthlyCost:form.advertisedMonthlyCost,notes:form.notes,history:[mkS(form,snapLbl||"Initial")]},...os]);}
+    }else{
+      if(!form.company.trim())return;
+      if(editId!==null){setOffers(os=>os.map(o=>{if(o.id!==editId)return o;return{...o,company:form.company,planName:form.planName,contractLength:form.contractLength,advertisedMonthlyCost:form.advertisedMonthlyCost,notes:form.notes,history:editedHistory(o)};}));setEditId(null);setEditSnapId(null);}
+      else if(updateId!==null){setOffers(os=>os.map(o=>{if(o.id!==updateId)return o;return{...o,history:[...(o.history||[]),mkS(form,snapLbl||"Update "+((o.history||[]).length+1))]};}));setUpdateId(null);}
+      else{setOffers(os=>[...os,{id:Date.now(),company:form.company,planName:form.planName,contractLength:form.contractLength,advertisedMonthlyCost:form.advertisedMonthlyCost,notes:form.notes,history:[mkS(form,snapLbl||"Initial")]}]);}
+    }
+    setForm({...EMPTY});setSnapLbl("");setShowForm(false);setFormIsC(false);
+  };
+  const startNew=(ic)=>{const f={...EMPTY};if(ic)f.company="My Current Plan";setForm(f);setEditId(null);setUpdateId(null);setSnapLbl("");setFormIsC(ic);setShowForm(true);setTimeout(()=>fRef.current&&fRef.current.scrollIntoView({behavior:"smooth"}),100);};
+  /* Load a specific snapshot into the form for editing. The snapshot's id is recorded so
+     submit() replaces it in place rather than appending a new one. */
+  const loadSnapForEdit=(o,s)=>{
+    const f={company:o.company,planName:o.planName,contractLength:o.contractLength,advertisedMonthlyCost:o.advertisedMonthlyCost||"",notes:o.notes||""};
+    SF.forEach(k=>f[k]=(s&&s[k])||"");
+    setForm(f);setEditId(o.id);setEditSnapId(s?s.id:null);setUpdateId(null);
+    setSnapLbl(s?(s.label||""):"");setFormIsC(isC(o));setShowForm(true);setSnapPicker(null);
+    setTimeout(()=>fRef.current&&fRef.current.scrollIntoView({behavior:"smooth"}),100);
+  };
+  const startEdit=(o)=>{
+    const hist=o.history||[];
+    /* Multiple snapshots → ask the user which one to edit. */
+    if(hist.length>1){setSnapPicker(o);return;}
+    loadSnapForEdit(o,hist[0]||null);
+  };
+  const startUpd=(o)=>{const s=curS(o);const f={...EMPTY,company:o.company,planName:o.planName,contractLength:o.contractLength,advertisedMonthlyCost:o.advertisedMonthlyCost||"",notes:o.notes||""};if(s)SF.forEach(k=>f[k]=s[k]||"");setForm(f);setUpdateId(o.id);setEditId(null);setSnapLbl("");setFormIsC(isC(o));setShowForm(true);setTimeout(()=>fRef.current&&fRef.current.scrollIntoView({behavior:"smooth"}),100);};
+  const del=(id)=>{setOffers(os=>os.filter(o=>o.id!==id));setCmpIds(c=>c.filter(x=>x!==id));if(expId===id)setExpId(null);if(histId===id){setHistId(null);setHistCmp([]);}};
+  const delSnp=(oid,sid)=>{setOffers(os=>os.map(o=>o.id!==oid?o:{...o,history:(o.history||[]).filter(s=>s.id!==sid)}));setHistCmp(c=>c.filter(x=>x!==sid));};
+  const handleSort=(k)=>{if(sortKey===k)setSortAsc(!sortAsc);else{setSortKey(k);setSortAsc(true);}};
+
+  const exportCSV=()=>{const rows=[CF.join(",")];offers.forEach(o=>{(o.history||[]).forEach(s=>{const vals=CF.map(k=>{if(k==="company")return o.company;if(k==="planName")return o.planName||"";if(k==="contractLength")return o.contractLength||"";if(k==="advertisedMonthlyCost")return o.advertisedMonthlyCost||"";if(k==="isCurrent")return isC(o)?"yes":"";if(k==="notes")return o.notes||"";if(k==="snapshotDate")return s.date||"";if(k==="snapshotLabel")return s.label||"";return s[k]||"";});rows.push(vals.map(v=>'"'+String(v).replace(/"/g,'""')+'"').join(","));});});const b=new Blob([rows.join("\n")],{type:"text/csv"});const u=URL.createObjectURL(b);const a=document.createElement("a");a.href=u;a.download="energy-offers-"+new Date().toISOString().slice(0,10)+".csv";a.click();URL.revokeObjectURL(u);setShowMenu(false);};
+
+  const importCSV=(e)=>{const file=e.target.files&&e.target.files[0];if(!file)return;const reader=new FileReader();reader.onload=(ev)=>{try{const lines=ev.target.result.split("\n").filter(l=>l.trim());if(lines.length<2)return;const hdr=lines[0].split(",").map(h=>h.replace(/"/g,"").trim());const drs=lines.slice(1).map(line=>{const vals=[];let cur="",inQ=false;for(let i=0;i<line.length;i++){const c=line[i];if(c==='"')inQ=!inQ;else if(c===','&&!inQ){vals.push(cur);cur="";}else cur+=c;}vals.push(cur);const obj={};hdr.forEach((h,i)=>obj[h]=(vals[i]||"").trim());return obj;});const grp={};drs.forEach(row=>{const key=row.company+"|||"+(row.planName||"");if(!grp[key])grp[key]={company:row.company,planName:row.planName||"",contractLength:row.contractLength||"",advertisedMonthlyCost:row.advertisedMonthlyCost||"",isCurrent:row.isCurrent==="yes",notes:row.notes||"",snaps:[]};const snap={id:Date.now()+Math.random()*1000,date:row.snapshotDate||new Date().toISOString().slice(0,10),label:row.snapshotLabel||""};SF.forEach(k=>snap[k]=row[k]||"");grp[key].snaps.push(snap);});const nw=Object.values(grp).map(g=>{const o={id:Date.now()+Math.random()*10000,company:g.company,planName:g.planName,contractLength:g.contractLength,advertisedMonthlyCost:g.advertisedMonthlyCost,notes:g.notes,history:g.snaps};if(g.isCurrent)o.tag=CTAG;return o;});const hic=nw.some(isC);setOffers(prev=>{let base=hic?prev.filter(o=>!isC(o)):prev;return[...base,...nw];});}catch(err){console.error(err);}e.target.value="";setShowMenu(false);};reader.readAsText(file);};
+
+  const [uploadMode,setUploadMode]=useState("merge");
+  /* uploadDialog drives the themed upload modal.
+     kind:'conflict'   → some uploaded months collide with stored months
+     kind:'replaceConfirm' → confirm wiping all stored data before file pick */
+  const [uploadDialog,setUploadDialog]=useState(null);
+
+  function parseSimpleUsageCSV(text){
+    const lines=text.split("\n").filter(l=>l.trim());if(lines.length<2)return null;
+    const hdr=lines[0].split(",").map(h=>h.trim().toLowerCase());
+    if(!hdr.includes("month"))return null;
+    const hasOff=hdr.includes("offpeakkwh")||hdr.includes("offpeak");
+    if(!hasOff)return null;
+    const iM=hdr.indexOf("month");
+    const iOff=hdr.includes("offpeakkwh")?hdr.indexOf("offpeakkwh"):hdr.indexOf("offpeak");
+    const iOn=hdr.includes("onpeakkwh")?hdr.indexOf("onpeakkwh"):hdr.indexOf("onpeak");
+    const iGas=hdr.includes("gasm3")?hdr.indexOf("gasm3"):hdr.indexOf("gas");
+    const iDays=hdr.indexOf("days");
+    const monthly={};
+    lines.slice(1).forEach(line=>{
+      const cols=line.split(",").map(c=>c.trim());
+      const key=cols[iM];if(!key||!/^\d{4}-\d{2}$/.test(key))return;
+      monthly[key]={offPeak:parseFloat(cols[iOff])||0,onPeak:iOn>=0?(parseFloat(cols[iOn])||0):0,gas:iGas>=0?(parseFloat(cols[iGas])||0):0,days:iDays>=0?(parseInt(cols[iDays])||30):30};
+    });
+    return Object.keys(monthly).length>0?monthly:null;
+  }
+
+  const handleUsageUpload=(e)=>{const file=e.target.files&&e.target.files[0];if(!file)return;const reader=new FileReader();reader.onload=(ev)=>{
+    const text=ev.target.result;
+    const parsed=parseSimpleUsageCSV(text)||parseHA(text,entityIds);
+    if(!parsed||Object.keys(parsed).length===0){setUploadDialog({kind:"error",message:"No matching data found. Check the file format or entity IDs."});return;}
+    /* Replace mode: wipe and apply (confirmation already happened before opening file picker). */
+    if(uploadMode==="replace"){setUsageData({...parsed});SV(UK,parsed);return;}
+    /* Merge mode: detect month-level conflicts. New months always merge in; conflicts go to the dialog. */
+    if(!usageData||!Object.keys(usageData).length){setUsageData({...parsed});SV(UK,parsed);return;}
+    const conflictKeys=Object.keys(parsed).filter(k=>usageData[k]).sort();
+    const newKeys=Object.keys(parsed).filter(k=>!usageData[k]).sort();
+    if(!conflictKeys.length){const merged={...usageData,...parsed};setUsageData({...merged});SV(UK,merged);return;}
+    setUploadDialog({kind:"conflict",incoming:parsed,conflictKeys,newKeys,chosen:Object.fromEntries(conflictKeys.map(k=>[k,true]))});
+  };reader.readAsText(file);setUploadKey(k=>k+1);};
+
+  /* Apply the user's per-month decisions from the conflict dialog. */
+  const applyConflictDialog=()=>{
+    if(!uploadDialog||uploadDialog.kind!=="conflict")return;
+    const merged={...(usageData||{})};
+    uploadDialog.newKeys.forEach(k=>{merged[k]=uploadDialog.incoming[k];});
+    uploadDialog.conflictKeys.forEach(k=>{if(uploadDialog.chosen[k])merged[k]=uploadDialog.incoming[k];});
+    setUsageData({...merged});SV(UK,merged);
+    setUploadDialog(null);
+  };
+
+  const exportUsageData=()=>{
+    const allMonths={};
+    if(usageData){Object.keys(usageData).forEach(k=>{const m=usageData[k];allMonths[k]={offPeak:m.offPeak,onPeak:m.onPeak,gas:m.gas,days:m.days||30,source:"ha"};});}
+    if(manual.months){Object.keys(manual.months).forEach(k=>{const m=manual.months[k];if(P(m.offPeak)>0||P(m.onPeak)>0||P(m.gas)>0){allMonths[k]={offPeak:P(m.offPeak),onPeak:P(m.onPeak),gas:P(m.gas),days:allMonths[k]?allMonths[k].days:30,source:"manual"};}});}
+    const keys=Object.keys(allMonths).sort();
+    if(!keys.length){alert("No usage data to export.");return;}
+    const rows=["month,offPeakKwh,onPeakKwh,gasM3,days,source"];
+    keys.forEach(k=>{const m=allMonths[k];rows.push([k,m.offPeak.toFixed(2),m.onPeak.toFixed(2),m.gas.toFixed(2),m.days,m.source||""].join(","));});
+    const b=new Blob([rows.join("\n")],{type:"text/csv"});const u=URL.createObjectURL(b);
+    const a=document.createElement("a");a.href=u;a.download="energy-usage-"+new Date().toISOString().slice(0,10)+".csv";a.click();URL.revokeObjectURL(u);
+  };
+
+  /* ── Render card ── */
+  const renderCard=(o,pinned)=>{
+    const snap=curS(o),ow=wS(o,snap),c=calcOffer(ow,usageCalc),cEst=calcOffer(ow,null);
+    const isExp=expId===o.id,isHist=histId===o.id,hLen=(o.history||[]).length;
+    const adv=P(o.advertisedMonthlyCost),advDiff=adv>0?c.mo-adv:null;
+    const curDiff=curMo!==null&&!pinned?c.mo-curMo:null;
+    return (<div key={o.id} className="offer-card" style={{...S.oCard,...(pinned?{border:"2px solid #2d6a4f40",background:"#f8fcf9"}:{})}}>
+      <div style={S.cTop}>
+        {!pinned&&<div className="tip-down" style={S.chkCol} data-tip="Select to compare"><input type="checkbox" checked={cmpIds.includes(o.id)} onChange={()=>setCmpIds(ci=>ci.includes(o.id)?ci.filter(x=>x!==o.id):[...ci,o.id])} style={S.chk}/></div>}
+        {pinned&&<div style={{...S.chkCol,background:"#2d6a4f10"}}><span style={{fontSize:16}}>🏠</span></div>}
+        <div style={S.cMain} onClick={()=>setExpId(isExp?null:o.id)}>
+          <div style={S.cHead}>
+            <div style={{display:"flex",alignItems:"center",flexWrap:"wrap",gap:6}}>
+              <span style={S.coName}>{o.company||"My Current Plan"}</span>
+              {o.planName&&<span style={S.pTag}>{o.planName}</span>}
+              {pinned&&<span style={{fontSize:10,color:"#2d6a4f",background:"#d0e8d8",padding:"2px 8px",borderRadius:5,fontWeight:700}}>CURRENT</span>}
+              {hLen>1&&<span style={S.hTag}>{hLen} snaps</span>}
+            </div>
+            <div style={S.prC}>
+              <div style={S.bigP}>{FE(c.mo)}<span style={S.perMo}>/mo {c.isActual?"actual":"est"}</span></div>
+              {c.isActual&&<div style={{fontSize:10,color:"#7a8a8a"}}>Est (annual): {FE(cEst.mo)}/mo</div>}
+              {adv>0&&<div style={{fontSize:11,color:"#6a7a7a"}}>Adv: {FE(adv)}/mo{advDiff!==null&&<span style={{marginLeft:4,fontWeight:600,color:advDiff>1?"#b44":advDiff<-1?"#2d6a4f":"#888"}}>({advDiff>0?"+":""}{FE(advDiff)})</span>}</div>}
+              {curDiff!==null&&<div style={{fontSize:11,color:curDiff>1?"#b44":curDiff<-1?"#2d6a4f":"#888",fontWeight:500}}>vs current: {curDiff>0?"+":""}{FE(curDiff)}</div>}
+              {snap&&<div style={{fontSize:10,color:"#8a9a9a",marginTop:1}}>{snap.label?snap.label+" · ":""}{snap.date}</div>}
+            </div>
+          </div>
+          <div style={S.rRow}>
+            <span style={S.pill}>⚡ Off {snap?FR(snap.offPeakRate):"—"}</span><span style={S.pill}>⚡ On {snap?FR(snap.onPeakRate):"—"}</span><span style={S.pill}>🔥 {snap?FR(snap.gasPrice):"—"}/m³</span>
+            <span style={{fontSize:10,color:"#8a9a9a",marginLeft:4}}>incl BTW</span>
+            <span style={S.expArr}>{isExp?"▲":"▼"}</span>
+          </div>
+        </div>
+        <div style={S.actCol}>
+          <button className="tip-down" style={updateId===o.id?S.aBtnAct:S.aBtn} onClick={()=>startUpd(o)} data-tip="New snapshot">↻</button>
+          <button className="tip-down" style={editId===o.id?S.aBtnAct:S.aBtn} onClick={()=>startEdit(o)} data-tip="Edit">✎</button>
+          <button className="tip-down" style={isHist?S.aBtnAct:S.aBtn} onClick={()=>{setHistId(isHist?null:o.id);setHistCmp([]);}} data-tip="History">📊</button>
+          <button className="tip-down act-del" style={{...S.aBtn,border:"1px solid #e8c4c4",color:"#b44"}} onClick={()=>{if(pinned?confirm("Remove current plan?"):true)del(o.id);}} data-tip="Delete">✕</button>
+        </div>
+      </div>
+      {isExp&&<div style={S.expP}>
+        {c.isActual&&<div style={{background:"#e8f4ee",borderRadius:8,padding:"10px 14px",marginTop:12,marginBottom:4,fontSize:12,color:"#2d6a4f"}}>{usageCalc&&usageCalc.isManual?"📝":"📊"} <strong>Using {usageCalc&&usageCalc.isManual?"manual":"actual"} usage</strong>{usageLabel?" from "+usageLabel:""}: {c.offKwh.toFixed(1)} kWh off-peak, {c.onKwh.toFixed(1)} kWh on-peak, {c.gasM3.toFixed(1)} m³ gas</div>}
+        <div style={S.costGrid}>
+          <div style={S.cBlk}><h4 style={S.cbT}>⚡ Electricity</h4>
+            <Row l={"Off-peak: "+c.offKwh.toFixed(1)+" kWh × "+FR(c.offR)+"/kWh"} r={FE(c.offKwh*c.offR)}/>
+            <Row l={"On-peak: "+c.onKwh.toFixed(1)+" kWh × "+FR(c.onR)+"/kWh"} r={FE(c.onKwh*c.onR)}/>
+            <BRow l="Energy cost" r={FE(c.ec)}/>
+            <div style={S.bDiv}/>
+            <Row l="Network" r={FE(c.en)}/><Row l="Delivery" r={FE(c.ed)}/>
+            <div style={{...S.bRow,color:"#2d6a4f"}}><span>Vermindering</span><span>−{FE(c.tr)}</span></div>
+            <TRow l="Elec. subtotal" r={FE(c.esub)}/></div>
+          <div style={S.cBlk}><h4 style={S.cbT}>🔥 Gas</h4>
+            <Row l={c.gasM3.toFixed(1)+" m³ × "+FR(c.gasR)+"/m³"} r={FE(c.gc)}/>
+            <BRow l="Energy cost" r={FE(c.gc)}/>
+            <div style={S.bDiv}/>
+            <Row l="Network" r={FE(c.gn)}/><Row l="Delivery" r={FE(c.gd)}/>
+            <TRow l="Gas subtotal" r={FE(c.gsub)}/></div>
+          <div style={{...S.cBlk,gridColumn:"1/-1",background:"#f0f5f2"}}><h4 style={S.cbT}>Total ({c.isActual?(usageLabel||"Actual"):"Annual"}) — all incl. BTW</h4>
+            <Row l="Electricity" r={FE(c.esub)}/><Row l="Gas" r={FE(c.gsub)}/>
+            <div style={{...S.bRow,fontWeight:700,fontSize:15,borderTop:"2px solid #2d6a4f",paddingTop:8,marginTop:4}}><span>Total incl BTW</span><span>{FE(c.tin)}</span></div>
+            <div style={{...S.bRow,fontWeight:700,fontSize:17,color:"#2d6a4f"}}><span>Monthly</span><span>{FE(c.mo)}/mo</span></div>
+            <div style={S.bDiv}/>
+            <div style={{...S.bRow,fontSize:11,color:"#8a9a9a"}}><span>Estimated BTW portion (21%)</span><span>≈ {FE(c.btwEst)}</span></div>
+            <div style={{...S.bRow,fontSize:11,color:"#8a9a9a"}}><span>Estimated excl BTW</span><span>≈ {FE(c.texEst)}</span></div>
+            {curMo!==null&&!pinned&&<div style={{...S.bRow,fontSize:12,color:"#6a7a7a",borderTop:"1px dashed #ccc",paddingTop:4,marginTop:4}}><span>vs Current ({FE(curMo)}/mo)</span><span style={{fontWeight:600,color:c.mo>curMo?"#b44":c.mo<curMo?"#2d6a4f":"#888"}}>{c.mo>curMo?"+":""}{FE(c.mo-curMo)}</span></div>}
+          </div>
+        </div>
+        {o.notes&&<p style={S.noteT}>📝 {o.notes}</p>}
+      </div>}
+      {isHist&&(<div style={{...S.expP,background:"#f8faf9"}}>
+        <h4 style={{...S.cbT,marginBottom:12}}>📊 History — Electricity & Monthly Cost</h4><TimelineChart offer={o}/>
+        {hLen>=2&&<><h4 style={{...S.cbT,marginBottom:12,marginTop:18}}>🔥 Gas History</h4><GasTimelineChart offer={o}/></>}
+        {hLen<2&&<p style={{fontSize:13,color:"#7a8a8a",marginTop:8}}>One snapshot. Click ↻ when rates change.</p>}
+        {histCmp.length>=2&&(<div style={{background:"#fff",borderRadius:10,padding:14,marginBottom:14,marginTop:14,border:"1px solid #e0e6e2"}}>
+          <h5 style={{fontSize:12,fontWeight:700,color:"#2d6a4f",marginBottom:8}}>SNAPSHOT COMPARISON</h5>
+          <table style={S.mTbl}><thead><tr><th style={S.mTh}>Field</th>{histCmp.map(sid=>{const s=(o.history||[]).find(x=>x.id===sid);return <th key={sid} style={{...S.mTh,textAlign:"center"}}>{s?s.label||"—":"—"}<br/><span style={{fontWeight:300,fontSize:10}}>{s?s.date:""}</span></th>;})}</tr></thead><tbody>
+            {[{l:"Off-Peak",k:"offPeakRate",f:FR},{l:"On-Peak",k:"onPeakRate",f:FR},{l:"Gas",k:"gasPrice",f:FR}].map(row=>(<tr key={row.k}><td style={S.mTd}>{row.l}</td>{histCmp.map(sid=>{const s=(o.history||[]).find(x=>x.id===sid);return <td key={sid} style={{...S.mTd,textAlign:"center"}}>{s?row.f(s[row.k]):"—"}</td>;})}</tr>))}
+            <tr><td style={{...S.mTd,fontWeight:700}}>Monthly</td>{histCmp.map(sid=>{const s=(o.history||[]).find(x=>x.id===sid);const c2=s?calcOffer(wS(o,s),usageCalc):null;return <td key={sid} style={{...S.mTd,textAlign:"center",fontWeight:700}}>{c2?FE(c2.mo):"—"}</td>;})}</tr>
+          </tbody></table></div>)}
+        <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:hLen>=2?12:0}}>
+          {(o.history||[]).map((s,i)=>{const sc=calcOffer(wS(o,s),usageCalc);const prev=i>0?calcOffer(wS(o,o.history[i-1]),usageCalc):null;const df=prev?sc.mo-prev.mo:null;
+            return (<div key={s.id} style={{background:"#fff",borderRadius:10,padding:"12px 14px",border:histCmp.includes(s.id)?"2px solid #2d6a4f":"1px solid #e8ecea",display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+              <div style={{display:"flex",alignItems:"center",gap:8}}><input type="checkbox" checked={histCmp.includes(s.id)} onChange={()=>setHistCmp(hc=>hc.includes(s.id)?hc.filter(x=>x!==s.id):[...hc,s.id])} style={S.chk}/><div><div style={{fontWeight:600,fontSize:14}}>{s.label||"Snap "+(i+1)}</div><div style={{fontSize:11,color:"#7a8a8a"}}>{s.date}</div></div></div>
+              <div style={{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap",fontSize:12}}>
+                <span style={S.pill}>⚡{FR(s.offPeakRate)}/{FR(s.onPeakRate)}</span><span style={S.pill}>🔥{FR(s.gasPrice)}</span>
+                <span style={{fontWeight:700,fontSize:14}}>{FE(sc.mo)}/mo</span>
+                {df!==null&&<span style={{fontWeight:600,color:df>0?"#b44":df<0?"#2d6a4f":"#888"}}>{df>0?"+":""}{FE(df)}</span>}
+                {hLen>1&&<button style={{...S.aBtn,width:22,height:22,fontSize:10,border:"1px solid #e8c4c4",color:"#b44"}} onClick={()=>delSnp(o.id,s.id)}>✕</button>}
+              </div></div>);})}
+        </div>
+        {hLen>=2&&histCmp.length<2&&<p style={{fontSize:12,color:"#7a8a8a",marginTop:8}}>Tick 2+ to compare.</p>}
+      </div>)}
+    </div>);
+  };
+
+  /* ── RENDER ── */
+  /* Themed upload dialog — replaces native confirm()/alert() so it matches the app's look. */
+  const renderUploadDialog=()=>{
+    if(!uploadDialog)return null;
+    const overlay={position:"fixed",inset:0,background:"rgba(26,42,26,.45)",zIndex:200,display:"flex",alignItems:"center",justifyContent:"center",padding:20,backdropFilter:"blur(2px)"};
+    const panelBase={background:"#fff",borderRadius:14,padding:"22px 24px",boxShadow:"0 10px 40px rgba(26,42,26,.25),0 2px 6px rgba(26,42,26,.08)",width:"100%",maxHeight:"85vh",display:"flex",flexDirection:"column"};
+    const closeBtn=()=>setUploadDialog(null);
+    if(uploadDialog.kind==="error"){
+      return (<div style={overlay} onClick={closeBtn}>
+        <div style={{...panelBase,maxWidth:380}} onClick={e=>e.stopPropagation()}>
+          <h3 style={S.secT}>Upload Failed</h3>
+          <p style={{fontSize:13,color:"#4a5a6a",marginBottom:18,lineHeight:1.5}}>{uploadDialog.message}</p>
+          <div style={S.fA}><button style={S.savB} onClick={closeBtn}>OK</button></div>
+        </div>
+      </div>);
+    }
+    if(uploadDialog.kind==="replaceConfirm"){
+      return (<div style={overlay} onClick={closeBtn}>
+        <div style={{...panelBase,maxWidth:420}} onClick={e=>e.stopPropagation()}>
+          <h3 style={S.secT}>Replace All Stored Data?</h3>
+          <p style={{fontSize:13,color:"#4a5a6a",marginBottom:18,lineHeight:1.5}}>This will discard all <strong>{Object.keys(usageData||{}).length}</strong> stored months and use only the uploaded file. This cannot be undone.</p>
+          <div style={S.fA}>
+            <button style={S.canB} onClick={closeBtn}>Cancel</button>
+            <button style={{...S.savB,background:"linear-gradient(135deg,#a55,#c66)"}} onClick={()=>{setUploadMode("replace");setUploadDialog(null);setTimeout(()=>usageRef.current&&usageRef.current.click(),50);}}>Replace All</button>
+          </div>
+        </div>
+      </div>);
+    }
+    if(uploadDialog.kind==="conflict"){
+      const {conflictKeys,newKeys,chosen,incoming}=uploadDialog;
+      const setChosen=(updater)=>setUploadDialog(d=>({...d,chosen:typeof updater==="function"?updater(d.chosen):updater}));
+      const overrideCount=conflictKeys.filter(k=>chosen[k]).length;
+      const fmt=(v)=>(typeof v==="number"?v:parseFloat(v)||0).toFixed(1);
+      return (<div style={overlay} onClick={closeBtn}>
+        <div style={{...panelBase,maxWidth:560}} onClick={e=>e.stopPropagation()}>
+          <h3 style={S.secT}>Existing Months Detected</h3>
+          <p style={{fontSize:13,color:"#4a5a6a",marginBottom:14,lineHeight:1.5}}>
+            <strong>{conflictKeys.length}</strong> month{conflictKeys.length!==1?"s":""} from this upload already exist in your stored data{newKeys.length>0?<span>; <strong>{newKeys.length}</strong> new month{newKeys.length!==1?"s":""} will be added automatically</span>:""}.
+            Check the months you want to <strong>override</strong> with the new values:
+          </p>
+          <div style={{display:"flex",gap:8,marginBottom:10}}>
+            <button style={{...S.canB,fontSize:11,padding:"4px 10px"}} onClick={()=>setChosen(Object.fromEntries(conflictKeys.map(k=>[k,true])))}>Select All</button>
+            <button style={{...S.canB,fontSize:11,padding:"4px 10px"}} onClick={()=>setChosen(Object.fromEntries(conflictKeys.map(k=>[k,false])))}>Select None</button>
+          </div>
+          <div style={{flex:1,overflowY:"auto",background:"#f8faf9",borderRadius:8,border:"1px solid #e8ecea",maxHeight:340}}>
+            {conflictKeys.map((k,i)=>{const old=usageData[k],n=incoming[k];const isOn=!!chosen[k];return (
+              <label key={k} style={{display:"flex",alignItems:"flex-start",gap:11,padding:"10px 12px",borderBottom:i<conflictKeys.length-1?"1px solid #e8ecea":"none",cursor:"pointer",background:isOn?"rgba(45,106,79,.04)":"transparent"}}>
+                <input type="checkbox" checked={isOn} onChange={e=>setChosen(c=>({...c,[k]:e.target.checked}))} style={{marginTop:3,accentColor:"#2d6a4f",width:15,height:15,cursor:"pointer"}}/>
+                <div style={{flex:1,fontSize:12}}>
+                  <div style={{fontWeight:700,color:"#1a3a2a",marginBottom:4,fontSize:13}}>{k}</div>
+                  <div style={{display:"grid",gridTemplateColumns:"60px 1fr",gap:"2px 10px",fontSize:11.5}}>
+                    <span style={{color:"#7a8a8a",fontWeight:600}}>Keep:</span>
+                    <span style={{color:"#5a6a6a"}}>{fmt(old.offPeak)} off · {fmt(old.onPeak)} on · {fmt(old.gas)} m³ <span style={{color:"#9aa"}}>({old.days||30}d)</span></span>
+                    <span style={{color:"#2d6a4f",fontWeight:600}}>New:</span>
+                    <span style={{color:"#1a3a2a"}}>{fmt(n.offPeak)} off · {fmt(n.onPeak)} on · {fmt(n.gas)} m³ <span style={{color:"#9aa"}}>({n.days||30}d)</span></span>
+                  </div>
+                </div>
+              </label>
+            );})}
+          </div>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:14,gap:10,flexWrap:"wrap"}}>
+            <span style={{fontSize:11,color:"#7a8a8a"}}>{overrideCount} of {conflictKeys.length} will be overridden{newKeys.length>0?` · ${newKeys.length} new added`:""}</span>
+            <div style={{display:"flex",gap:10}}>
+              <button style={S.canB} onClick={closeBtn}>Cancel</button>
+              <button style={S.savB} onClick={applyConflictDialog}>Apply</button>
+            </div>
+          </div>
+        </div>
+      </div>);
+    }
+    return null;
+  };
+
+  /* Themed picker that lets the user choose which snapshot to edit when an offer has more than one. */
+  const renderSnapPicker=()=>{
+    if(!snapPicker)return null;
+    const o=snapPicker;const hist=(o.history||[]).slice().reverse();
+    const overlay={position:"fixed",inset:0,background:"rgba(26,42,26,.45)",zIndex:200,display:"flex",alignItems:"center",justifyContent:"center",padding:20,backdropFilter:"blur(2px)"};
+    const panel={background:"#fff",borderRadius:14,padding:"22px 24px",boxShadow:"0 10px 40px rgba(26,42,26,.25),0 2px 6px rgba(26,42,26,.08)",width:"100%",maxWidth:540,maxHeight:"85vh",display:"flex",flexDirection:"column"};
+    return (<div style={overlay} onClick={()=>setSnapPicker(null)}>
+      <div style={panel} onClick={e=>e.stopPropagation()}>
+        <h3 style={S.secT}>Choose Snapshot to Edit</h3>
+        <p style={{fontSize:13,color:"#4a5a6a",marginBottom:14,lineHeight:1.5}}><strong>{o.company}</strong>{o.planName?" · "+o.planName:""} has <strong>{(o.history||[]).length}</strong> snapshots. Pick the one you want to modify — your changes will replace it in place.</p>
+        <div style={{flex:1,overflowY:"auto",background:"#f8faf9",borderRadius:8,border:"1px solid #e8ecea"}}>
+          {hist.map((s,i)=>{const sc=calcOffer(wS(o,s),usageCalc);return (
+            <button key={s.id} onClick={()=>loadSnapForEdit(o,s)} style={{display:"flex",width:"100%",alignItems:"center",justifyContent:"space-between",gap:10,padding:"12px 14px",borderBottom:i<hist.length-1?"1px solid #e8ecea":"none",background:"transparent",border:"none",borderLeft:"4px solid transparent",cursor:"pointer",textAlign:"left",transition:"all .12s ease"}} onMouseEnter={e=>{e.currentTarget.style.background="rgba(45,106,79,.06)";e.currentTarget.style.borderLeftColor="#2d6a4f";}} onMouseLeave={e=>{e.currentTarget.style.background="transparent";e.currentTarget.style.borderLeftColor="transparent";}}>
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{fontWeight:700,color:"#1a3a2a",fontSize:14,marginBottom:2}}>{s.label||"(unlabeled)"}{i===0&&<span style={{...S.uL,marginLeft:8,fontSize:9}}>LATEST</span>}</div>
+                <div style={{fontSize:11,color:"#7a8a8a",marginBottom:4}}>{s.date}</div>
+                <div style={{display:"flex",gap:10,flexWrap:"wrap",fontSize:11.5,color:"#5a6a6a"}}>
+                  <span>⚡ Off <strong style={{color:"#3a7dc9"}}>{FR(s.offPeakRate)}</strong></span>
+                  <span>⚡ On <strong style={{color:"#e07a3a"}}>{FR(s.onPeakRate)}</strong></span>
+                  <span>🔥 Gas <strong style={{color:"#c94a6a"}}>{FR(s.gasPrice)}</strong></span>
+                </div>
+              </div>
+              <div style={{textAlign:"right",flexShrink:0}}>
+                <div style={{fontWeight:700,fontSize:14,color:"#2d6a4f"}}>{FE(sc.mo)}</div>
+                <div style={{fontSize:10,color:"#8a9a9a",textTransform:"uppercase",letterSpacing:".05em"}}>per mo</div>
+              </div>
+            </button>);})}
+        </div>
+        <div style={{...S.fA,marginTop:14}}>
+          <button style={S.canB} onClick={()=>setSnapPicker(null)}>Cancel</button>
+        </div>
+      </div>
+    </div>);
+  };
+
+  return (<div>
+    {renderUploadDialog()}
+    {renderSnapPicker()}
+    <input type="file" accept=".csv" ref={fileRef} style={{display:"none"}} onChange={importCSV}/>
+    <input type="file" accept=".csv" key={"usage"+uploadKey} ref={usageRef} style={{display:"none"}} onChange={handleUsageUpload}/>
+    <div style={S.header}><div style={S.hI}>
+      <div><h1 style={S.title}>Energy Offers</h1><p style={S.sub}>{offers.length} plan{offers.length!==1?"s":""} · NL 2026{hasManual?" · manual usage":usageData?" · HA usage":""}</p></div>
+      <div style={{display:"flex",gap:8,alignItems:"center"}}>
+        <button style={showHelp?S.iBtnAct:S.iBtn} onClick={()=>setShowHelp(!showHelp)} data-tip="Help & instructions">📖</button>
+        <button style={showUsage?S.iBtnAct:S.iBtn} onClick={()=>setShowUsage(!showUsage)} data-tip="Set energy usage (manual or HA)">📊</button>
+        <button style={showTax?S.iBtnAct:S.iBtn} onClick={()=>setShowTax(!showTax)} data-tip="Tax brackets (info only)">🏛</button>
+        <div style={{position:"relative"}}><button style={S.iBtn} onClick={()=>setShowMenu(!showMenu)} data-tip="Export / Import / Reset">⋯</button>
+          {showMenu&&<div><div style={{position:"fixed",inset:0,zIndex:9}} onClick={()=>setShowMenu(false)}/><div style={S.menu}><button style={S.mI} onClick={exportCSV}>📤 Export CSV</button><button style={S.mI} onClick={()=>fileRef.current&&fileRef.current.click()}>📥 Import CSV</button><button style={{...S.mI,color:"#a55"}} onClick={()=>{if(confirm("Delete ALL?")){setOffers([]);setCmpIds([]);setExpId(null);setHistId(null);}setShowMenu(false);}}>🗑 Reset All</button></div></div>}
+        </div>
+        {canCmp&&<button style={S.cBtn} onClick={()=>setShowCmp(!showCmp)} data-tip="Compare offers vs current">{showCmp?"✕":"Compare"+(cmpO.length?" "+cmpO.length:"")}</button>}
+        <button style={S.addBtn} onClick={()=>startNew(false)} data-tip="Add new offer">+</button>
+      </div>
+    </div></div>
+
+    <div style={S.cnt}>
+      {/* Help */}
+      {showHelp&&(<div style={S.card}><h3 style={S.secT}>📖 How to Use</h3>
+        <div style={{fontSize:13,lineHeight:1.7,color:"#3a4a4a"}}>
+          <p><strong>1.</strong> Set your <strong>current plan</strong> (🏠 card below) as a baseline.</p>
+          <p><strong>2.</strong> <strong>Upload smart meter data</strong> (📊) from Home Assistant to use real usage instead of estimates.</p>
+          <p><strong>3.</strong> <strong>Add offers</strong> (+) you're considering. <strong>All rates and costs are entered incl. BTW</strong> — exactly as shown on your energy bill or offer documents.</p>
+          <p><strong>4.</strong> <strong>Compare</strong> — tick 1+ offers and click Compare. Current plan is always included.</p>
+          <p><strong>5.</strong> <strong>Track changes</strong> — click ↻ to add snapshots when rates change. 📊 shows history with timeline charts.</p>
+          <p style={{marginTop:8,background:"#e8f4ee",padding:"8px 10px",borderRadius:6}}><strong>Simplified BTW:</strong> Everything you enter is incl. BTW. The calculator just multiplies rates × usage and adds fixed costs. BTW is estimated at the end for reference only (total ÷ 1.21 × 0.21).</p>
+          <p style={{marginTop:8}}><strong>Buttons:</strong> <span style={S.kbd}>📊</span> Upload usage · <span style={S.kbd}>?</span> Tax brackets · <span style={S.kbd}>⋯</span> Export/Import CSV · <span style={S.kbd}>↻</span> New snapshot · <span style={S.kbd}>✎</span> Edit · <span style={S.kbd}>📊</span> History · <span style={S.kbd}>✕</span> Delete</p>
+        </div>
+      </div>)}
+
+      {/* Usage data */}
+      {showUsage&&(<div style={S.card}>
+        <h3 style={S.secT}>📊 Energy Usage Data</h3>
+
+        {/* Top-level: which month drives all cost calculations? */}
+        {combinedMonthly&&Object.keys(combinedMonthly).length>0&&(<div style={{background:"linear-gradient(135deg,rgba(45,106,79,.06),rgba(58,125,92,.04))",border:"1px solid rgba(45,106,79,.2)",borderRadius:10,padding:"12px 16px",marginBottom:16}}>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,flexWrap:"wrap"}}>
+            <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+              <label style={{fontSize:11,fontWeight:700,color:"#2d6a4f",textTransform:"uppercase",letterSpacing:".04em"}}>📅 Calculation Month</label>
+              <select style={{...S.input,padding:"6px 10px",fontSize:13,width:"auto",minWidth:240,background:"#fff",fontWeight:600}} value={usageMonthOverride} onChange={e=>setUsageMonthOverride(e.target.value)}>
+                <option value="">Auto{bestMonth?" — currently "+bestMonth.key+(combinedMonthly[bestMonth.key]&&combinedMonthly[bestMonth.key].source==="manual"?" (manual)":""):""}</option>
+                {Object.keys(combinedMonthly).sort().reverse().map(k=>{const m=combinedMonthly[k];return (<option key={k} value={k}>{k}{m.source==="manual"?" (manual)":""} — {m.offPeak.toFixed(0)}/{m.onPeak.toFixed(0)} kWh · {m.gas.toFixed(0)} m³</option>);})}
+              </select>
+              {usageMonthOverride&&<button style={{...S.canB,fontSize:11,padding:"4px 10px"}} onClick={()=>setUsageMonthOverride("")}>Reset to auto</button>}
+            </div>
+            <span style={{fontSize:11,color:"#5a7a6a"}}>{Object.keys(combinedMonthly).length} month{Object.keys(combinedMonthly).length!==1?"s":""} available</span>
+          </div>
+          <p style={{fontSize:11,color:"#5a7a6a",marginTop:6,lineHeight:1.4}}>This month's usage drives every offer's monthly cost. Auto picks the best recent month; choose a specific month to override.</p>
+        </div>)}
+
+        {/* Manual input - per month */}
+        <div style={{background:"#f8faf9",borderRadius:10,padding:"14px 16px",marginBottom:16}}>
+          <h4 style={S.mT}>Manual Monthly Usage</h4>
+          <p style={{fontSize:12,color:"#6a7a7a",marginBottom:10}}>Enter your usage per month. Select which month to use for cost calculations. Leave empty to use annual estimates.</p>
+
+          <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:12,flexWrap:"wrap"}}>
+            <input style={{...S.input,width:140}} type="month" value={manual.editMonth||""} onChange={e=>setManual(m=>({...m,editMonth:e.target.value}))}/>
+            <button style={{...S.savB,fontSize:12,padding:"6px 14px"}} onClick={()=>addManualMonth(manual.editMonth)}>+ Add Month</button>
+            {manualKeys.length>0&&<span style={{fontSize:11,color:"#7a8a8a"}}>{manualKeys.length} month{manualKeys.length!==1?"s":""} stored</span>}
+          </div>
+
+          {manualKeys.length>0&&(<div>
+            <div style={{display:"flex",gap:4,marginBottom:10,flexWrap:"wrap"}}>
+              {manualKeys.map(k=>(<button key={k} onClick={()=>selectManualMonth(k)} style={{padding:"4px 10px",borderRadius:8,border:manualSel===k?"2px solid #2d6a4f":"1px solid #d0d8d4",background:manualSel===k?"#e8f4ee":"#fff",fontSize:12,fontWeight:manualSel===k?700:400,color:manualSel===k?"#2d6a4f":"#4a5a6a",fontFamily:"'DM Sans'",cursor:"pointer"}}>{k}{manualSel===k&&" ✓"}</button>))}
+            </div>
+
+            {manualSel&&manualMonths[manualSel]&&(<div style={{background:"#fff",borderRadius:8,padding:"12px 14px",border:hasManual?"2px solid #2d6a4f30":"1px solid #e8ecea"}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                <span style={{fontSize:13,fontWeight:600,color:"#1a3a2a"}}>{manualSel}</span>
+                <button style={{...S.canB,fontSize:10,padding:"3px 8px",color:"#a55",borderColor:"#e0c0c0"}} onClick={()=>delManualMonth(manualSel)}>Remove</button>
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10}}>
+                <div style={S.fW}><label style={S.label}>Off-Peak <span style={S.uL}>kWh</span></label><input style={S.input} type="number" step="any" placeholder="e.g. 120" value={manualMonths[manualSel].offPeak} onChange={e=>setManualMonth(manualSel,"offPeak",e.target.value)}/></div>
+                <div style={S.fW}><label style={S.label}>On-Peak <span style={S.uL}>kWh</span></label><input style={S.input} type="number" step="any" placeholder="e.g. 180" value={manualMonths[manualSel].onPeak} onChange={e=>setManualMonth(manualSel,"onPeak",e.target.value)}/></div>
+                <div style={S.fW}><label style={S.label}>Gas <span style={S.uL}>m³</span></label><input style={S.input} type="number" step="any" placeholder="e.g. 100" value={manualMonths[manualSel].gas} onChange={e=>setManualMonth(manualSel,"gas",e.target.value)}/></div>
+              </div>
+            </div>)}
+          </div>)}
+
+          {hasManual&&<div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:10,gap:10,flexWrap:"wrap"}}>
+            <span style={{fontSize:12,color:"#2d6a4f",fontWeight:600}}>{overrideValid?"Manual "+manualSel+" stored — calculations use "+effectiveMonthKey+" (your pick).":"✓ Using "+manualSel+" for all calculations"}</span>
+            <button style={{...S.canB,fontSize:11,padding:"4px 10px",color:"#a55",borderColor:"#e0c0c0"}} onClick={()=>setManual({...defManual})}>Clear All</button>
+          </div>}
+          {!hasManual&&!usageData&&<p style={{fontSize:11,color:"#8a9a9a",marginTop:8}}>No usage data — using annual estimates from each offer's settings.</p>}
+          {!hasManual&&usageData&&bestMonth&&<p style={{fontSize:11,color:"#7a8a8a",marginTop:8}}>No manual values set — falling back to Home Assistant data below.</p>}
+        </div>
+
+        {/* HA Upload */}
+        <div style={{background:hasManual?"#fafafa":"#f8faf9",borderRadius:10,padding:"14px 16px",opacity:hasManual?0.6:1}}>
+          <h4 style={S.mT}>Home Assistant CSV {hasManual&&<span style={{fontWeight:400,fontStyle:"italic",textTransform:"none"}}>(overridden by manual input above)</span>}</h4>
+          <p style={{fontSize:12,color:"#6a7a7a",marginBottom:10}}>Upload a Home Assistant energy export CSV for automatic monthly usage detection.</p>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10,marginBottom:10}}>
+            <div style={S.fW}><label style={S.label}>Off-Peak Entity ID</label><input style={S.input} value={entityIds.t1} onChange={e=>setEntityIds(x=>({...x,t1:e.target.value}))}/></div>
+            <div style={S.fW}><label style={S.label}>On-Peak Entity ID</label><input style={S.input} value={entityIds.t2} onChange={e=>setEntityIds(x=>({...x,t2:e.target.value}))}/></div>
+            <div style={S.fW}><label style={S.label}>Gas Entity ID</label><input style={S.input} value={entityIds.gas} onChange={e=>setEntityIds(x=>({...x,gas:e.target.value}))}/></div>
+          </div>
+          <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+            <button style={S.savB} onClick={()=>{setUploadMode("merge");setTimeout(()=>usageRef.current&&usageRef.current.click(),50);}} data-tip="Upload a CSV. New months are added; if a month already exists you'll be asked whether to override it.">📥 Upload Usage Data</button>
+            <button style={{...S.canB,fontSize:12}} onClick={()=>{if(usageData)setUploadDialog({kind:"replaceConfirm"});else{setUploadMode("replace");setTimeout(()=>usageRef.current&&usageRef.current.click(),50);}}} data-tip="Discard all stored months and use only the uploaded file">↻ Replace All</button>
+            {(usageData||hasManual)&&<button style={{...S.canB,fontSize:12}} onClick={exportUsageData} data-tip="Export all usage data (HA + manual) as CSV">📤 Export Usage</button>}
+            {usageData&&<button style={{...S.canB,fontSize:12,color:"#a55",borderColor:"#e0c0c0"}} onClick={()=>{setUsageData(null);}}>✕ Clear</button>}
+          </div>
+          {usageData&&<p style={{fontSize:11,color:"#7a8a8a",marginTop:6}}>{Object.keys(usageData).length} months stored. <strong>Upload Usage Data</strong> adds new months automatically; if a month already exists, you'll be prompted to keep the old value or override it. <strong>Replace All</strong> wipes everything first.</p>}
+          {combinedMonthly&&bestMonth&&(<div style={{marginTop:12}}>
+            <div style={{background:"#e8f4ee",borderRadius:8,padding:"10px 14px",marginBottom:10}}>
+              <div style={{fontWeight:700,fontSize:13,color:"#2d6a4f",marginBottom:6}}>✓ Usage data loaded — best month: {bestMonth.key}{bestMonth.isLastYear?" (same month last year)":""}{combinedMonthly[bestMonth.key]&&combinedMonthly[bestMonth.key].source==="manual"?" (manual)":""}</div>
+              <div style={{display:"flex",gap:16,fontSize:12,flexWrap:"wrap"}}>
+                <span>⚡ Off: <strong>{bestMonth.offPeak.toFixed(1)} kWh</strong></span>
+                <span>⚡ On: <strong>{bestMonth.onPeak.toFixed(1)} kWh</strong></span>
+                <span>🔥 Gas: <strong>{bestMonth.gas.toFixed(1)} m³</strong></span>
+                <span>({bestMonth.days} days)</span>
+              </div>
+            </div>
+            <h4 style={S.mT}>Monthly Usage Overview <span style={{fontWeight:400,fontSize:11,color:"#7a8a8a",textTransform:"none"}}>(dashed bars = manual entries)</span></h4>
+            <UsageChart monthly={combinedMonthly} key={JSON.stringify(Object.keys(combinedMonthly||{}))+"-"+Object.keys(combinedMonthly||{}).filter(k=>combinedMonthly[k].source==="manual").join(",")}/>
+          </div>)}
+        </div>
+
+        <div style={{marginTop:14,padding:"10px 14px",background:usageCalc?"#e8f4ee":"#f5f0eb",borderRadius:8,fontSize:12,fontWeight:600,color:usageCalc?"#2d6a4f":"#8a7a5a"}}>
+          {usageCalc
+            ?(usageCalc.isOverride?"🎯":(usageCalc.isManual?"📝":"📊"))+" Calculating with "+(usageCalc.isManual?"manual":"HA")+" usage ("+usageLabel+"): "+usageCalc.offPeakKwh.toFixed(1)+" kWh off + "+usageCalc.onPeakKwh.toFixed(1)+" kWh on + "+usageCalc.gasM3.toFixed(1)+" m³ gas"
+            :"📐 Calculating with annual estimates from each offer"}
+        </div>
+      </div>)}
+
+      {/* Tax info */}
+      {showTax&&(<div style={S.card}><h3 style={S.secT}>2026 Energiebelasting (reference only)</h3>
+        <p style={{fontSize:12,color:"#6a7a7a",marginBottom:12,background:"#f5f0eb",padding:"8px 10px",borderRadius:6}}>These tax rates are shown for <strong>reference only</strong>. They are NOT used in calculations — your entered rates already include energy tax and BTW.</p>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:20}}>
+          <div><h4 style={S.mT}>Electricity</h4><table style={S.mTbl}><thead><tr><th style={S.mTh}>Bracket</th><th style={S.mTh}>Rate (excl BTW)</th></tr></thead><tbody>{EB.map((b,i)=><tr key={i}><td style={S.mTd}>{b.label} kWh</td><td style={S.mTd}>€{b.rate.toFixed(4)}</td></tr>)}</tbody></table></div>
+          <div><h4 style={S.mT}>Gas</h4><table style={S.mTbl}><thead><tr><th style={S.mTh}>Bracket</th><th style={S.mTh}>Rate (excl BTW)</th></tr></thead><tbody>{GB.map((b,i)=><tr key={i}><td style={S.mTd}>{b.label} m³</td><td style={S.mTd}>€{b.rate.toFixed(4)}</td></tr>)}</tbody></table></div>
+        </div><p style={S.taxN}>Vermindering: €628.96/yr incl BTW. These brackets are baked into the rates on your energy bill — you don't need to calculate them separately.</p>
+      </div>)}
+
+      {/* Form */}
+      {showForm&&(<div ref={fRef} style={S.card}><h2 style={S.secT}>{formIsC?(editId?"Edit Current":updateId?"Update Current":"Set Current"):(editId?"Edit Offer":updateId?"Update Rates":"Add Offer")}</h2>
+        {updateId&&<p style={{fontSize:13,color:"#5a7a6a",marginBottom:12,background:"#e8f0ec",padding:"8px 12px",borderRadius:8}}>📝 New snapshot. Previous preserved.</p>}
+        {editId&&editSnapId!==null&&(()=>{const o=offers.find(x=>x.id===editId);const s=o&&(o.history||[]).find(x=>x.id===editSnapId);return s?<p style={{fontSize:13,color:"#5a7a6a",marginBottom:12,background:"#e8f0ec",padding:"8px 12px",borderRadius:8}}>✎ Editing snapshot <strong>{s.label||"(unlabeled)"}</strong> · {s.date} — changes replace this snapshot in place.</p>:null;})()}
+        <div style={{marginBottom:14}}><label style={S.label}>Snapshot Label</label><input style={{...S.input,marginTop:4}} type="text" placeholder="e.g. Jan 2026..." value={snapLbl} onChange={e=>setSnapLbl(e.target.value)}/></div>
+        {SECS.map(sec=>(<div key={sec.t} style={{marginBottom:16}}><h4 style={S.fSL}>{sec.t}</h4><div style={S.fG}>{sec.f.map(f=>(<div key={f.k} style={S.fW}><label style={S.label}>{f.l}{f.u&&<span style={S.uL}>{f.u}</span>}</label><input style={S.input} type={f.t} step={f.t==="number"?"any":undefined} placeholder={f.p} value={form[f.k]} onChange={e=>ch(f.k,e.target.value)}/></div>))}</div></div>))}
+        <div style={{marginBottom:14}}><label style={S.label}>Notes</label><input style={{...S.input,marginTop:4}} type="text" placeholder="Optional..." value={form.notes} onChange={e=>ch("notes",e.target.value)}/></div>
+        <div style={S.fA}><button style={S.canB} onClick={()=>{setShowForm(false);setEditId(null);setEditSnapId(null);setUpdateId(null);setFormIsC(false);setForm({...EMPTY});setSnapLbl("");}}>Cancel</button><button style={S.savB} onClick={submit}>{editId?"Save":updateId?"Add Snapshot":"Save"}</button></div>
+      </div>)}
+
+      {/* Compare */}
+      {showCmp&&cmpAll.length>=2&&(<div style={S.card}><h2 style={S.secT}>Comparison{usageCalc?(usageCalc.isManual?" (manual usage)":" (actual usage)"):""}</h2>
+        <CompareCharts items={cmpAll} usage={usageCalc} key={"cmp"+(usageCalc?(usageCalc.isManual?"manual":bestMonth?bestMonth.key:"ha"):"est")}/>
+        <div style={{overflowX:"auto",marginTop:16}}><table style={S.mTbl}><thead><tr><th style={S.mTh}>Field</th>{cmpAll.map(o=><th key={o.id} style={{...S.mTh,textAlign:"center",...(isC(o)?{background:"#f0f2f1"}:{})}}>{fullName(o)}</th>)}</tr></thead><tbody>
+          {[{l:"Off-Peak",k:"offPeakRate",f:FR},{l:"On-Peak",k:"onPeakRate",f:FR},{l:"Gas",k:"gasPrice",f:FR}].map(row=>{
+            const vals=cmpAll.filter(o=>!isC(o)).map(o=>{const s=curS(o);return s?P(s[row.k]):0;}).filter(v=>v>0);
+            const best=vals.length?Math.min(...vals):null;
+            return <tr key={row.k}><td style={S.mTd}>{row.l}</td>{cmpAll.map(o=>{const s=curS(o);const v=s?P(s[row.k]):0;const ib=!isC(o)&&v>0&&v===best;return <td key={o.id} style={{...S.mTd,textAlign:"center",...(isC(o)?{background:"#fafafa"}:{}),...(ib?S.best:{})}}>{s?row.f(s[row.k]):"—"}</td>;})}</tr>;
+          })}
+          <tr><td colSpan={99} style={{borderBottom:"2px solid #2d6a4f20",padding:0}}></td></tr>
+          {(()=>{const cs=cmpAll.map(o=>calcOffer(wS(o,curS(o)),usageCalc));const bm=Math.min(...cs.map(c=>c.mo));return[
+            <tr key="m"><td style={{...S.mTd,fontWeight:700}}>{usageCalc?"Actual /mo":"Est /mo"}</td>{cs.map((c,i)=><td key={cmpAll[i].id} style={{...S.mTd,textAlign:"center",fontWeight:700,...(isC(cmpAll[i])?{background:"#fafafa"}:{}),...(Math.abs(c.mo-bm)<.01?S.best:{})}}>{FE(c.mo)}</td>)}</tr>,
+            curMo!==null&&<tr key="d"><td style={{...S.mTd,fontWeight:600}}>vs Current</td>{cs.map((c,i)=>{const d=c.mo-curMo;return <td key={cmpAll[i].id} style={{...S.mTd,textAlign:"center",fontWeight:600,color:isC(cmpAll[i])?"#888":d>1?"#b44":d<-1?"#2d6a4f":"#888"}}>{isC(cmpAll[i])?"baseline":(d>0?"+":"")+FE(d)}</td>;})}</tr>,
+          ];})()}
+        </tbody></table></div>
+      </div>)}
+
+      {/* Current plan */}
+      {curO?renderCard(curO,true):(<div style={{...S.card,border:"2px dashed #2d6a4f40",textAlign:"center",padding:"24px 20px",cursor:"pointer"}} onClick={()=>startNew(true)}>
+        <div style={{fontSize:28,marginBottom:6}}>🏠</div><div style={{fontWeight:700,fontSize:15,color:"#2d6a4f"}}>Set Your Current Plan</div>
+        <div style={{fontSize:12,color:"#7a8a8a",marginTop:4}}>Enter your current energy rates as a baseline for comparison.</div>
+      </div>)}
+
+      {/* Offer list */}
+      {others.length>0&&<div style={{...S.sortBar,marginTop:16}}><span style={S.sortLbl}>Sort:</span>{[{k:"company",l:"Name"},{k:"_mo",l:"Cost"},{k:"contractLength",l:"Contract"}].map(s=>(<button key={s.k} style={sortKey===s.k?S.sortAct:S.sortBn} onClick={()=>handleSort(s.k)}>{s.l}{sortKey===s.k?(sortAsc?" ↑":" ↓"):""}</button>))}</div>}
+      {sorted.map(o=>renderCard(o,false))}
+      {others.length===0&&!curO&&(<div style={S.empty}><div style={{fontSize:44,marginBottom:10}}>⚡</div><p style={{fontFamily:"'Instrument Serif',serif",fontSize:22,color:"#2d6a4f"}}>No offers yet</p><p style={{fontSize:13,color:"#7a8a8a",marginTop:6}}>Click + to add offers or 📖 for help.</p></div>)}
+    </div>
+  </div>);
+}
+
+const S={
+  header:{background:"linear-gradient(135deg,#1a3a2a 0%,#2d6a4f 60%,#3a7d5c 100%)",padding:"24px 20px 20px"},
+  hI:{maxWidth:920,margin:"0 auto",display:"flex",justifyContent:"space-between",alignItems:"center"},
+  title:{fontFamily:"'Instrument Serif',serif",fontSize:26,fontWeight:400,color:"#f0f4f1",letterSpacing:"-.02em"},
+  sub:{fontSize:11,color:"#a8d4b8",fontWeight:300,marginTop:2},
+  cnt:{maxWidth:920,margin:"0 auto",padding:"16px 16px 40px"},
+  addBtn:{width:36,height:36,borderRadius:"50%",border:"2px solid rgba(168,212,184,.5)",background:"transparent",color:"#f0f4f1",fontSize:18,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"},
+  iBtn:{width:28,height:28,borderRadius:"50%",border:"1.5px solid rgba(168,212,184,.5)",background:"transparent",color:"#a8d4b8",fontSize:12,fontWeight:700,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'Instrument Serif',serif"},
+  iBtnAct:{width:28,height:28,borderRadius:"50%",border:"1.5px solid #f0f4f1",background:"rgba(255,255,255,.22)",color:"#f0f4f1",fontSize:12,fontWeight:700,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'Instrument Serif',serif",boxShadow:"0 0 0 3px rgba(168,212,184,.3)"},
+  cBtn:{padding:"6px 12px",borderRadius:16,border:"1.5px solid rgba(168,212,184,.5)",background:"rgba(255,255,255,.08)",color:"#f0f4f1",fontSize:12,fontWeight:500,cursor:"pointer",fontFamily:"'DM Sans',sans-serif"},
+  menu:{position:"absolute",right:0,top:34,background:"#fff",borderRadius:10,boxShadow:"0 4px 20px rgba(0,0,0,.12)",padding:4,zIndex:10,minWidth:150},
+  mI:{display:"block",width:"100%",padding:"8px 13px",border:"none",background:"transparent",textAlign:"left",fontSize:13,cursor:"pointer",borderRadius:6,fontFamily:"'DM Sans'",color:"#1a2a1a"},
+  card:{background:"#fff",borderRadius:14,padding:"18px",boxShadow:"0 1px 3px rgba(26,42,26,.03),0 6px 20px rgba(26,42,26,.02)",marginBottom:14},
+  secT:{fontFamily:"'Instrument Serif',serif",fontSize:18,fontWeight:400,color:"#1a3a2a",marginBottom:10},
+  mT:{fontSize:11,fontWeight:700,color:"#2d6a4f",marginBottom:6,textTransform:"uppercase",letterSpacing:".04em"},
+  mTbl:{width:"100%",borderCollapse:"collapse",fontSize:13},
+  mTh:{padding:"6px 8px",textAlign:"left",fontSize:10,fontWeight:600,color:"#5a6a6a",borderBottom:"2px solid #e8ecea",textTransform:"uppercase"},
+  mTd:{padding:"5px 8px",borderBottom:"1px solid #f0f2f1",fontSize:13},
+  best:{background:"rgba(45,106,79,.05)",color:"#2d6a4f",fontWeight:700},
+  taxN:{fontSize:11,color:"#6a7a7a",marginTop:10},
+  fSL:{fontSize:10,fontWeight:700,color:"#2d6a4f",textTransform:"uppercase",letterSpacing:".06em",marginBottom:6,paddingBottom:3,borderBottom:"1px solid #e8ecea"},
+  fG:{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(155px,1fr))",gap:8},
+  fW:{display:"flex",flexDirection:"column",gap:3},
+  label:{fontSize:10,fontWeight:500,color:"#4a5a6a",textTransform:"uppercase",letterSpacing:".05em",display:"flex",alignItems:"center",gap:4},
+  uL:{fontSize:8,color:"#2d6a4f",background:"rgba(45,106,79,.07)",padding:"1px 4px",borderRadius:3,fontWeight:600},
+  input:{padding:"7px 9px",borderRadius:7,border:"1.5px solid #d0d8d4",fontSize:13,fontFamily:"'DM Sans'",color:"#1a2a1a",background:"#fafbfc",width:"100%"},
+  fA:{display:"flex",justifyContent:"flex-end",gap:10},
+  canB:{padding:"7px 14px",borderRadius:7,border:"1.5px solid #d0d8d4",background:"transparent",fontSize:13,fontWeight:500,cursor:"pointer",color:"#4a5a6a",fontFamily:"'DM Sans'"},
+  savB:{padding:"7px 18px",borderRadius:7,border:"none",background:"linear-gradient(135deg,#2d6a4f,#3a7d5c)",color:"#fff",fontSize:13,fontWeight:700,cursor:"pointer",fontFamily:"'DM Sans'"},
+  sortBar:{display:"flex",alignItems:"center",gap:6,marginBottom:10,flexWrap:"wrap"},
+  sortLbl:{fontSize:12,color:"#5a6a6a",fontWeight:500},
+  sortBn:{padding:"4px 10px",borderRadius:12,border:"1px solid #d0d8d4",background:"#fff",fontSize:12,cursor:"pointer",color:"#4a5a6a",fontFamily:"'DM Sans'"},
+  sortAct:{padding:"4px 10px",borderRadius:12,border:"1.5px solid #2d6a4f",background:"rgba(45,106,79,.05)",fontSize:12,cursor:"pointer",color:"#2d6a4f",fontWeight:600,fontFamily:"'DM Sans'"},
+  oCard:{background:"#fff",borderRadius:14,boxShadow:"0 1px 3px rgba(26,42,26,.02),0 4px 14px rgba(26,42,26,.015)",marginBottom:10},
+  cTop:{display:"flex",alignItems:"stretch"},
+  chkCol:{display:"flex",alignItems:"center",padding:"0 9px",borderRight:"1px solid #f0f2f1"},
+  chk:{width:14,height:14,accentColor:"#2d6a4f",cursor:"pointer"},
+  cMain:{flex:1,padding:"11px 13px",cursor:"pointer"},
+  cHead:{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:6},
+  coName:{fontWeight:700,fontSize:14,color:"#1a3a2a"},
+  pTag:{fontSize:10,color:"#5a7a6a",background:"#e8f0ec",padding:"2px 6px",borderRadius:4,fontWeight:500},
+  hTag:{fontSize:9,color:"#7a6a2a",background:"#f5f0e0",padding:"2px 6px",borderRadius:4,fontWeight:600},
+  prC:{textAlign:"right"},
+  bigP:{fontSize:18,fontWeight:700,color:"#1a3a2a"},
+  perMo:{fontSize:10,fontWeight:400,color:"#6a7a7a"},
+  rRow:{display:"flex",gap:5,marginTop:6,alignItems:"center",flexWrap:"wrap"},
+  pill:{fontSize:10,color:"#4a6a5a",background:"#f4f8f6",padding:"2px 8px",borderRadius:8},
+  expArr:{fontSize:10,color:"#8a9a9a",marginLeft:"auto"},
+  actCol:{display:"flex",flexDirection:"column",justifyContent:"center",gap:3,padding:"0 7px",borderLeft:"1px solid #f0f2f1"},
+  aBtn:{width:24,height:24,borderRadius:5,border:"1px solid #d0d8d4",background:"transparent",cursor:"pointer",fontSize:11,color:"#4a5a6a",display:"flex",alignItems:"center",justifyContent:"center",transition:"all .15s ease"},
+  aBtnAct:{width:24,height:24,borderRadius:5,border:"1px solid #2d6a4f",background:"linear-gradient(135deg,#2d6a4f,#3a7d5c)",cursor:"pointer",fontSize:11,color:"#f0f4f1",display:"flex",alignItems:"center",justifyContent:"center",boxShadow:"0 2px 6px rgba(45,106,79,.3)",transition:"all .15s ease"},
+  aBtnDelAct:{width:24,height:24,borderRadius:5,border:"1px solid #b44",background:"linear-gradient(135deg,#b44,#c66)",cursor:"pointer",fontSize:11,color:"#fff",display:"flex",alignItems:"center",justifyContent:"center",boxShadow:"0 2px 6px rgba(180,68,68,.3)",transition:"all .15s ease"},
+  expP:{padding:"0 13px 14px",borderTop:"1px solid #e8ecea"},
+  costGrid:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginTop:10},
+  cBlk:{background:"#f8faf9",borderRadius:9,padding:"11px 13px"},
+  cbT:{fontSize:10,fontWeight:700,color:"#2d6a4f",textTransform:"uppercase",letterSpacing:".04em",marginBottom:7},
+  bRow:{display:"flex",justifyContent:"space-between",fontSize:12,padding:"2px 0"},
+  bBold:{display:"flex",justifyContent:"space-between",fontSize:12,padding:"4px 0 2px",fontWeight:700,borderTop:"1px solid #e0e6e2",marginTop:2},
+  bTot:{display:"flex",justifyContent:"space-between",fontSize:13,padding:"6px 0 2px",fontWeight:700,borderTop:"2px solid rgba(45,106,79,.25)",marginTop:4},
+  bDiv:{height:1,background:"#e8ecea",margin:"4px 0"},
+  noteT:{fontSize:12,color:"#6a7a7a",fontStyle:"italic",marginTop:8},
+  empty:{textAlign:"center",padding:"50px 24px"},
+  kbd:{display:"inline",padding:"2px 6px",borderRadius:4,border:"1px solid #d0d8d4",background:"#f4f8f6",fontSize:11,fontWeight:600,color:"#2d6a4f"},
+};
+
+ReactDOM.render(React.createElement(App),document.getElementById("root"));
+</script>
+</body>
+</html>
