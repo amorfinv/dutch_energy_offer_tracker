@@ -4,7 +4,7 @@ A single-file, no-build web app for comparing Dutch electricity & gas offers sid
 
 Built as one self-contained web app. All data is stored locally in your browser — nothing leaves your machine.
 
-<img width="1115" height="982" alt="image" src="https://github.com/user-attachments/assets/dc794ff8-541a-49c4-ab7b-8a4e4f9d0204" />
+<img width="1331" height="1042" alt="energy-offer-tracker-demo" src="https://github.com/user-attachments/assets/0f23f33a-1fca-4df1-8c34-c899794f81b3" />
 
 ## Features
 
