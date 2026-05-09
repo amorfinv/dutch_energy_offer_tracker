@@ -4,7 +4,7 @@ A single-file, no-build web app for comparing Dutch electricity & gas offers sid
 
 Built as one self-contained web app. All data is stored locally in your browser — nothing leaves your machine.
 
-<img width="1331" height="1042" alt="energy-offer-tracker-demo" src="https://github.com/user-attachments/assets/ba889936-594e-4967-81fa-7e32686af56c" />
+<img width="1331" height="1042" alt="energy-offer-tracker-demo" src="https://github.com/user-attachments/assets/03fa238d-53bd-45e0-a4e4-ed8787d8c7ee" />
 
 ## Features
 
@@ -56,12 +56,6 @@ The 2026 energiebelasting reference table is included in the *Tax brackets* pane
 ## Roadmap
 
 A large TODO is to add **hourly consumption data** so the tracker can do a proper **dynamic electricity analysis** — comparing fixed-rate offers against dynamic (EPEX/day-ahead) tariffs using your actual hour-by-hour usage profile rather than a flat off-peak / on-peak split. This means importing hourly Home Assistant exports, ingesting day-ahead price curves, and computing what each offer would have cost over the same period.
-
-## Tech
-
-- HTML, vanilla CSS, React 18 (UMD), Babel-standalone, Chart.js 4
-- No bundler, no package manager, no backend
-- Storage: `localStorage` keys `energy-offers-v8`, `energy-usage-v1`, `energy-manual-usage-v2`
 
 ## Disclaimer
 
